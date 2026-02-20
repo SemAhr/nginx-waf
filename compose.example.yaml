@@ -1,0 +1,70 @@
+services:
+  waf:
+    image: nginx-waf:1.28.2-modsec3.0.14-crs4.23.0
+    container_name: waf
+    ports:
+      - "8080:80"
+      - "8443:443"
+    environment:
+      # Default behavior (HTTP only)
+      ENABLE_HTTPS: "0"
+
+      # If you set ENABLE_HTTPS=1, LE is assumed unless explicitly disabled:
+      # ENABLE_LETSENCRYPT: "0"   # manual certs mode
+
+      # Used only when ENABLE_LETSENCRYPT=1
+      LE_WEBROOT: /var/www/_letsencrypt
+
+      # Reload nginx when certs change (useful with certbot renew)
+      AUTO_RELOAD_CERTS: "1"
+    volumes:
+      # You control these from the host
+      - ./conf.d/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
+      - ./sites-enabled:/etc/nginx/sites-enabled:ro
+
+      # For Let's Encrypt (safe to keep even if not used)
+      - letsencrypt:/etc/letsencrypt
+      - acme_webroot:/var/www/_letsencrypt
+
+      # Logs (optional but helpful)
+      - waf_logs:/var/log/nginx
+    depends_on:
+      - app1
+      - app2
+    restart: unless-stopped
+
+  # Dummy upstreams for testing
+  app1:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:8080", "-text=app1 ok"]
+    expose:
+      - "8080"
+    restart: unless-stopped
+
+  app2:
+    image: hashicorp/http-echo:1.0
+    command: ["-listen=:9090", "-text=app2 ok"]
+    expose:
+      - "9090"
+    restart: unless-stopped
+
+  # Optional: certbot for auto-renew (only useful when ENABLE_HTTPS=1 and ENABLE_LETSENCRYPT=1)
+  certbot:
+    image: ${CERTBOT_IMAGE:-certbot/certbot:latest}
+    volumes:
+      - letsencrypt:/etc/letsencrypt
+      - acme_webroot:/var/www/_letsencrypt
+    entrypoint: ["sh", "-c"]
+    command: >
+      trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/_letsencrypt --quiet;
+        sleep 12h;
+      done
+    restart: unless-stopped
+    profiles: ["le"]
+
+volumes:
+  letsencrypt:
+  acme_webroot:
+  waf_logs:
