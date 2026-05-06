@@ -1,0 +1,17 @@
+services:
+  waf:
+    image: nginx-waf:1.28.2-modsec3.0.14-crs4.23.0
+    container_name: nginx-waf
+    ports:
+      - "80:80"
+    environment:
+      ENABLE_HTTPS: "0"
+      AUTO_RELOAD_CERTS: "1"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro,Z
+      - ./sites-enabled:/etc/nginx/sites-enabled:ro,Z
+      - waf_logs:/var/log/nginx
+    restart: unless-stopped
+
+volumes:
+  waf_logs:

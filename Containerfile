@@ -166,9 +166,6 @@ RUN mkdir -p \
 
 # Minimal config files
 COPY nginx.conf /etc/nginx/nginx.conf
-COPY conf.d/maps.conf /etc/nginx/conf.d/maps.conf
-COPY conf.d/proxy_common.conf /etc/nginx/conf.d/proxy_common.conf
-COPY conf.d/upstreams.conf /etc/nginx/conf.d/upstreams.conf
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

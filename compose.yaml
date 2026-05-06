@@ -19,7 +19,7 @@ services:
       AUTO_RELOAD_CERTS: "1"
     volumes:
       # You control these from the host
-      - ./conf.d/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
+      - ./conf.d:/etc/nginx/conf.d:ro
       - ./sites-enabled:/etc/nginx/sites-enabled:ro
 
       # For Let's Encrypt (safe to keep even if not used)
@@ -28,24 +28,6 @@ services:
 
       # Logs (optional but helpful)
       - waf_logs:/var/log/nginx
-    depends_on:
-      - app1
-      - app2
-    restart: unless-stopped
-
-  # Dummy upstreams for testing
-  app1:
-    image: hashicorp/http-echo:1.0
-    command: ["-listen=:8080", "-text=app1 ok"]
-    expose:
-      - "8080"
-    restart: unless-stopped
-
-  app2:
-    image: hashicorp/http-echo:1.0
-    command: ["-listen=:9090", "-text=app2 ok"]
-    expose:
-      - "9090"
     restart: unless-stopped
 
   # Optional: certbot for auto-renew (only useful when ENABLE_HTTPS=1 and ENABLE_LETSENCRYPT=1)
