@@ -36,11 +36,12 @@ It assumes:
       crs-setup.conf
       rules/*.conf
   conf.d/
-    00-redirect-all.conf      # generated at runtime by entrypoint
-    maps.conf
-    proxy_common.conf
-    upstreams.conf            # meant to be mounted
-  sites-enabled/              # meant to be mounted
+    maps.conf                 # baked into image
+    proxy_common.conf         # baked into image
+    proxy_http.conf           # baked into image (optional)
+    proxy_ws.conf             # baked into image (optional)
+    upstreams.conf            # meant to be mounted at runtime
+  sites-enabled/              # meant to be mounted at runtime
 ```
 
 ---
@@ -49,15 +50,17 @@ It assumes:
 
 ### Default behavior
 
-* **HTTP only**
-* A runtime-generated default server answers `/healthz` and returns `404` for most other paths.
+* **HTTP only** (port 80)
+* Port 443 is available but requires you to provide server blocks in `sites-enabled/`
+* No default server is automatically generated; you must define all server blocks
+* Requests to undefined `server_name` values will be dropped or matched to the first defined server
 
 ### Environment variables
 
 | Variable             |                 Default | Meaning                                                                                                                                                             |
 | -------------------- | ----------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ENABLE_HTTPS`       |                     `0` | When `1`, the container generates an HTTP->HTTPS redirect server on port 80.                                                                                        |
-| `ENABLE_LETSENCRYPT` |                    auto | If `ENABLE_HTTPS=1` and this is **unset**, it defaults to `1` (Let’s Encrypt mode). If set to `0`, you must provide certs manually in your `sites-enabled` configs. |
+| `ENABLE_HTTPS`       |                     `0` | When `1`, assumes you will handle HTTPS setup manually (no redirect server generated).                                                                              |
+| `ENABLE_LETSENCRYPT` |                    auto | If `ENABLE_HTTPS=1` and this is **unset**, it defaults to `1` (Let's Encrypt mode). If set to `0`, you must provide certs manually in your `sites-enabled` configs. |
 | `LE_WEBROOT`         | `/var/www/_letsencrypt` | ACME webroot where `.well-known/acme-challenge/` is served (only used when LE is enabled).                                                                          |
 | `AUTO_RELOAD_CERTS`  |                     `1` | When `1`, a background watcher triggers `nginx -s reload` when `/etc/letsencrypt` changes (useful for renewals).                                                    |
 
@@ -74,12 +77,14 @@ A volume should persist `/etc/letsencrypt`.
 
 ---
 
-## 3) Minimal host files you manage
+## 3) Runtime mounts from your host
 
-You manage (mount from host):
+You manage (mount from host at runtime):
 
 1. `./conf.d/upstreams.conf` → `/etc/nginx/conf.d/upstreams.conf`
 2. `./sites-enabled/` → `/etc/nginx/sites-enabled/`
+
+> Note: `maps.conf`, `proxy_common.conf`, and helper configs like `proxy_http.conf` / `proxy_ws.conf` are **baked into the image** and included from `nginx.conf`. If you need custom versions, rebuild the image or mount them to override.
 
 ### 3.1 `conf.d/upstreams.conf`
 
@@ -106,6 +111,11 @@ upstream app2_backend {
 
 Each file contains one or more `server {}` blocks.
 
+The image includes proxy helper configs in `conf.d/`:
+* `proxy_common.conf` — common proxy headers (Host, X-Forwarded-*, X-Request-Id)
+* `proxy_http.conf` — HTTP-specific (disables Connection header)
+* `proxy_ws.conf` — WebSocket-specific (Upgrade, Connection)
+
 For HTTP smoke testing, a simple example:
 
 ```nginx
@@ -118,13 +128,15 @@ server {
   modsecurity_rules_file /etc/nginx/modsec/modsecurity.conf;
 
   location /app1/ {
-    include /etc/nginx/conf.d/proxy_common.conf;
     proxy_pass http://app1_backend/;
+    include /etc/nginx/conf.d/proxy_common.conf;
+    include /etc/nginx/conf.d/proxy_http.conf;
   }
 
   location /app2/ {
-    include /etc/nginx/conf.d/proxy_common.conf;
     proxy_pass http://app2_backend/;
+    include /etc/nginx/conf.d/proxy_common.conf;
+    include /etc/nginx/conf.d/proxy_http.conf;
   }
 
   location /healthz {
@@ -133,17 +145,23 @@ server {
 }
 ```
 
-#### Why `server_name localhost` matters
+#### Why `server_name` matters
 
-If your default server uses `server_name _;` and your test server also uses `_`, Nginx may warn:
+Nginx matches requests to server blocks using the `Host` header. If two server blocks try to use `server_name _;` (wildcard), one will be ignored and you'll see warnings:
 
 ```
 conflicting server name "_" on 0.0.0.0:80, ignored
 ```
 
-And your custom routes won’t match.
+**Solution**: Use specific server names that match your test/production domains:
 
-When you request `http://localhost:8080/...`, the `Host` header is `localhost`. Using `server_name localhost;` makes your server block match correctly.
+```nginx
+server_name localhost;                    # for local testing
+server_name your-domain.com;              # for production
+server_name 10.10.10.115 127.0.0.1;      # for private networks
+```
+
+When you request `http://localhost:8080/...`, the `Host` header is `localhost`. Using `server_name localhost;` ensures your block matches correctly.
 
 ---
 
@@ -161,15 +179,19 @@ services:
       - "8443:443"
     environment:
       ENABLE_HTTPS: "0"          # default: HTTP only
-      # ENABLE_HTTPS: "1"        # enable HTTP->HTTPS redirect on :80
+      # ENABLE_HTTPS: "1"        # enable HTTPS support (manual cert setup)
       # ENABLE_LETSENCRYPT: "0"  # manual certs (only if ENABLE_HTTPS=1)
       LE_WEBROOT: /var/www/_letsencrypt
       AUTO_RELOAD_CERTS: "1"
     volumes:
+      # Your custom upstream definitions
       - ./conf.d/upstreams.conf:/etc/nginx/conf.d/upstreams.conf:ro
+      # Your custom server blocks
       - ./sites-enabled:/etc/nginx/sites-enabled:ro
+      # Let's Encrypt persistence (safe to include even if not used)
       - letsencrypt:/etc/letsencrypt
       - acme_webroot:/var/www/_letsencrypt
+      # Logs
       - waf_logs:/var/log/nginx
     depends_on:
       - app1
@@ -190,7 +212,7 @@ services:
 
   # Optional: certbot renewal loop (useful only if ENABLE_HTTPS=1 and ENABLE_LETSENCRYPT=1)
   certbot:
-    image: certbot/certbot:latest
+    image: ${CERTBOT_IMAGE:-certbot/certbot:latest}
     volumes:
       - letsencrypt:/etc/letsencrypt
       - acme_webroot:/var/www/_letsencrypt
@@ -230,16 +252,43 @@ curl -i http://localhost:8080/app2/
 
 ## 5) HTTPS modes
 
-### 5.1 HTTPS + Let’s Encrypt (default when `ENABLE_HTTPS=1`)
+### 5.1 HTTPS + Let's Encrypt setup
 
-1. Set environment:
+**Prerequisites:**
+1. Your domain DNS must point to the host running this container.
+2. Port 80 and 443 must be accessible from the internet.
 
-```env
-ENABLE_HTTPS=1
-# ENABLE_LETSENCRYPT not set => defaults to 1
+**Steps:**
+
+1. Set environment variables in your `compose.yaml`:
+
+```yaml
+environment:
+  ENABLE_HTTPS: "1"
+  # ENABLE_LETSENCRYPT defaults to 1 when ENABLE_HTTPS=1
+  LE_WEBROOT: /var/www/_letsencrypt
+  AUTO_RELOAD_CERTS: "1"
 ```
 
-2. Issue the certificate **once** (requires your domain DNS pointing to the host):
+2. Create an HTTP server block in `sites-enabled/` to handle ACME challenges:
+
+```nginx
+server {
+  listen 80;
+  server_name your-domain.com;
+
+  location /.well-known/acme-challenge/ {
+    root /var/www/_letsencrypt;
+  }
+
+  # Optional: redirect all other traffic to HTTPS
+  location / {
+    return 301 https://$host$request_uri;
+  }
+}
+```
+
+3. Issue the certificate **once** (requires DNS pointing to host):
 
 ```bash
 podman compose --profile le run --rm certbot certonly \
@@ -249,7 +298,7 @@ podman compose --profile le run --rm certbot certonly \
   -m you@your-domain.com
 ```
 
-3. Add a 443 server block in `sites-enabled/` that references LE paths:
+4. Add a 443 server block in `sites-enabled/` that references LE paths:
 
 ```nginx
 server {
@@ -263,28 +312,52 @@ server {
   modsecurity_rules_file /etc/nginx/modsec/modsecurity.conf;
 
   location / {
-    include /etc/nginx/conf.d/proxy_common.conf;
     proxy_pass http://app1_backend;
+    include /etc/nginx/conf.d/proxy_common.conf;
+    include /etc/nginx/conf.d/proxy_http.conf;
   }
 }
 ```
 
-4. Restart WAF container (or rely on reload watcher if certs already exist):
+5. Bring the container up:
 
 ```bash
-podman compose restart waf
+podman compose up -d
 ```
 
-### 5.2 HTTPS + manual certificates (Let’s Encrypt disabled)
+The `AUTO_RELOAD_CERTS` watcher will detect certificate renewals and reload Nginx automatically.
+
+### 5.2 HTTPS + manual certificates
 
 * Set:
 
-```env
-ENABLE_HTTPS=1
-ENABLE_LETSENCRYPT=0
+```yaml
+environment:
+  ENABLE_HTTPS: "1"
+  ENABLE_LETSENCRYPT: "0"
 ```
 
-* You must mount your certs and reference them in your own 443 `server {}` blocks.
+* You must mount your own certificates and reference them in your `sites-enabled/` server blocks:
+
+```yaml
+volumes:
+  - ./certs/domain.com.crt:/etc/nginx/certs/domain.com.crt:ro
+  - ./certs/domain.com.key:/etc/nginx/certs/domain.com.key:ro
+```
+
+Then reference them in your server block:
+
+```nginx
+server {
+  listen 443 ssl http2;
+  server_name your-domain.com;
+  
+  ssl_certificate     /etc/nginx/certs/your-domain.com.crt;
+  ssl_certificate_key /etc/nginx/certs/your-domain.com.key;
+  
+  # ... rest of config
+}
+```
 
 ---
 
@@ -334,17 +407,20 @@ After you tune exclusions (recommended):
 
 Cause:
 
-* Two `server {}` blocks on port 80 with `server_name _;`.
+* Two or more `server {}` blocks with `server_name _;` on the same port.
+* Nginx will only use one and ignore the others.
 
 Fix:
 
-* Give your real site a specific name like `server_name localhost;` or your domain.
+* Give each site a specific name like `server_name localhost;`, `server_name your-domain.com;`, or `server_name 127.0.0.1;`
+* Never use multiple `server_name _;` blocks on the same port.
 
 ### 7.2 Requests return 404 from Nginx
 
 Cause:
 
-* You are hitting the default server generated by entrypoint.
+* No server block matches your request's `Host` header.
+* Nginx will use the first defined server block as a fallback.
 
 Fix:
 
@@ -416,23 +492,27 @@ podman exec waf nginx -T
 
 ---
 
-## Appendix A: Minimal files to keep in your repo
+## Appendix A: Files baked into the image
 
-* `Containerfile`
-* `entrypoint.sh`
+**These are part of the container build** (in the `Containerfile`):
+
 * `nginx.conf`
 * `conf.d/maps.conf`
 * `conf.d/proxy_common.conf`
-* `conf.d/upstreams.conf` (placeholder)
+* `conf.d/proxy_http.conf` (optional HTTP proxy helpers)
+* `conf.d/proxy_ws.conf` (optional WebSocket proxy helpers)
+* `entrypoint.sh`
 
-Runtime-managed:
+**These you provide at runtime** (mounted as volumes):
 
-* `./conf.d/upstreams.conf` (real upstreams)
-* `./sites-enabled/*.conf` (all servers)
+* `./conf.d/upstreams.conf` (your custom upstream definitions)
+* `./sites-enabled/*.conf` (your custom server blocks)
 
 ---
 
-## Appendix B: Minimal `sites-enabled` server for localhost testing
+## Appendix B: Example `sites-enabled/` configurations
+
+### HTTP proxy with common headers
 
 ```nginx
 server {
@@ -442,9 +522,25 @@ server {
   modsecurity on;
   modsecurity_rules_file /etc/nginx/modsec/modsecurity.conf;
 
-  location /app1/ {
+  location /api/ {
+    proxy_pass http://api_backend/;
     include /etc/nginx/conf.d/proxy_common.conf;
-    proxy_pass http://app1_backend/;
+    include /etc/nginx/conf.d/proxy_http.conf;
+  }
+}
+```
+
+### WebSocket proxy
+
+```nginx
+server {
+  listen 80;
+  server_name localhost;
+
+  location /ws/ {
+    proxy_pass http://ws_backend/;
+    include /etc/nginx/conf.d/proxy_common.conf;
+    include /etc/nginx/conf.d/proxy_ws.conf;
   }
 }
 ```
